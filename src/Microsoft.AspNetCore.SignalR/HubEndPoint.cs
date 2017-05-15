@@ -322,18 +322,15 @@ namespace Microsoft.AspNetCore.SignalR
             }
         }
 
-        private async Task StreamResultsAsync(string invocationId, Connection connection, IHubProtocol protocol, ReadableChannel<object> channel)
+        private async Task StreamResultsAsync(string invocationId, Connection connection, IHubProtocol protocol, IAsyncEnumerator<object> enumerator)
         {
             // TODO: Cancellation?
             try
             {
-                while (await channel.WaitToReadAsync())
+                while (await enumerator.MoveNextAsync())
                 {
-                    while (channel.TryRead(out var item))
-                    {
-                        // Send the stream item
-                        await SendMessageAsync(connection, protocol, new StreamItemMessage(invocationId, item));
-                    }
+                    // Send the stream item
+                    await SendMessageAsync(connection, protocol, new StreamItemMessage(invocationId, enumerator.Current));
                 }
 
                 await SendMessageAsync(connection, protocol, CompletionMessage.Empty(invocationId));
@@ -344,31 +341,31 @@ namespace Microsoft.AspNetCore.SignalR
             }
         }
 
-        private bool IsStreamed(ObjectMethodExecutor methodExecutor, object result, out ReadableChannel<object> channel)
+        private bool IsStreamed(ObjectMethodExecutor methodExecutor, object result, out IAsyncEnumerator<object> enumerator)
         {
             // TODO: Cache attributes the OME?
             var streamingAttribute = methodExecutor.MethodInfo.ReturnParameter.GetCustomAttribute<StreamingAttribute>();
             if (streamingAttribute == null)
             {
-                channel = null;
+                enumerator = null;
                 return false;
             }
 
             var observableInterface = result.GetType().GetInterfaces().FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IObservable<>));
             if (observableInterface != null)
             {
-                channel = ChannelAdapters.FromObservable(result, observableInterface);
+                enumerator = AsyncEnumeratorAdapters.FromObservable(result, observableInterface);
                 return true;
             }
             else if (IsChannel(result.GetType(), out var payloadType))
             {
-                channel = ChannelAdapters.FromChannel(result, payloadType);
+                enumerator = AsyncEnumeratorAdapters.FromChannel(result, payloadType);
                 return true;
             }
             else
             {
-                channel = null;
-                return false;
+                // This type cannot be streamed
+                throw new NotSupportedException($"Cannot stream results of type: {result.GetType().FullName}");
             }
         }
 

@@ -2,30 +2,26 @@ using System;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Threading.Tasks.Channels;
 
 namespace Microsoft.AspNetCore.SignalR.Internal
 {
     // True-internal because this is a weird and tricky class to use :)
-    internal static class ChannelAdapters
+    internal static class AsyncEnumeratorAdapters
     {
-        private static readonly MethodInfo _fromObservableMethod = typeof(ChannelAdapters)
+        private static readonly MethodInfo _fromObservableMethod = typeof(AsyncEnumeratorAdapters)
             .GetRuntimeMethods()
             .Single(m => m.Name.Equals(nameof(FromObservable)) && m.IsGenericMethod);
-        private static readonly MethodInfo _toObjectChannelMethod = typeof(ChannelAdapters)
-            .GetRuntimeMethods()
-            .Single(m => m.Name.Equals(nameof(FromChannel)) && m.IsGenericMethod);
 
-        public static ReadableChannel<object> FromObservable(object observable, Type observableInterface)
+        public static IAsyncEnumerator<object> FromObservable(object observable, Type observableInterface)
         {
             // TODO: Cache expressions by observable.GetType()?
-            return (ReadableChannel<object>)_fromObservableMethod
+            return (IAsyncEnumerator<object>)_fromObservableMethod
                 .MakeGenericMethod(observableInterface.GetGenericArguments())
                 .Invoke(null, new[] { observable });
         }
 
-        public static ReadableChannel<object> FromObservable<T>(IObservable<T> observable)
+        public static IAsyncEnumerator<object> FromObservable<T>(IObservable<T> observable)
         {
             // TODO: Allow bounding and optimizations?
             var channel = Channel.CreateUnbounded<object>();
@@ -33,50 +29,15 @@ namespace Microsoft.AspNetCore.SignalR.Internal
 
             var subscription = observable.Subscribe(new ChannelObserver<T>(channel.Out, cancellationTokenSource.Token));
 
-            return channel.In;
+            return channel.In.GetAsyncEnumerator();
         }
 
-        public static ReadableChannel<object> FromChannel(object readableChannelOfT, Type payloadType)
+        public static IAsyncEnumerator<object> FromChannel(object readableChannelOfT, Type payloadType)
         {
-            // TODO: Cache expressions by readableChannelOfT.GetType()?
-            return (ReadableChannel<object>)_toObjectChannelMethod
-                .MakeGenericMethod(new[] { payloadType })
-                .Invoke(null, new[] { readableChannelOfT });
-        }
-
-        private static ReadableChannel<object> FromChannel<T>(ReadableChannel<T> channel)
-        {
-            var outputChannel = Channel.CreateUnbounded<object>();
-
-            Task.Run(async () =>
-            {
-                try
-                {
-                    while (await channel.WaitToReadAsync())
-                    {
-                        while (channel.TryRead(out var payload))
-                        {
-                            while (!outputChannel.Out.TryWrite(payload))
-                            {
-                                if (!await outputChannel.Out.WaitToWriteAsync())
-                                {
-                                    // Output was completed, just exit
-                                    return;
-                                }
-                            }
-                        }
-                    }
-
-                    // Input completed, close the output
-                    outputChannel.Out.TryComplete();
-                }
-                catch (Exception ex)
-                {
-                    outputChannel.Out.TryComplete(ex);
-                }
-            });
-
-            return outputChannel.In;
+            return (IAsyncEnumerator<object>)readableChannelOfT
+                .GetType()
+                .GetRuntimeMethod("GetAsyncEnumerator", new[] { typeof(CancellationToken) })
+                .Invoke(readableChannelOfT, Array.Empty<object>());
         }
 
         private class ChannelObserver<T> : IObserver<T>
