@@ -1,17 +1,21 @@
 using System;
-using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Threading.Tasks.Channels;
 
 namespace Microsoft.AspNetCore.SignalR.Internal
 {
-    public static class ChannelAdapters
+    // True-internal because this is a weird and tricky class to use :)
+    internal static class ChannelAdapters
     {
         private static readonly MethodInfo _fromObservableMethod = typeof(ChannelAdapters)
             .GetRuntimeMethods()
-            .Single(m => m.Name.Equals("FromObservable") && m.IsGenericMethod);
+            .Single(m => m.Name.Equals(nameof(FromObservable)) && m.IsGenericMethod);
+        private static readonly MethodInfo _toObjectChannelMethod = typeof(ChannelAdapters)
+            .GetRuntimeMethods()
+            .Single(m => m.Name.Equals(nameof(FromChannel)) && m.IsGenericMethod);
 
         public static ReadableChannel<object> FromObservable(object observable, Type observableInterface)
         {
@@ -30,6 +34,49 @@ namespace Microsoft.AspNetCore.SignalR.Internal
             var subscription = observable.Subscribe(new ChannelObserver<T>(channel.Out, cancellationTokenSource.Token));
 
             return channel.In;
+        }
+
+        public static ReadableChannel<object> FromChannel(object readableChannelOfT, Type payloadType)
+        {
+            // TODO: Cache expressions by readableChannelOfT.GetType()?
+            return (ReadableChannel<object>)_toObjectChannelMethod
+                .MakeGenericMethod(new[] { payloadType })
+                .Invoke(null, new[] { readableChannelOfT });
+        }
+
+        private static ReadableChannel<object> FromChannel<T>(ReadableChannel<T> channel)
+        {
+            var outputChannel = Channel.CreateUnbounded<object>();
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    while (await channel.WaitToReadAsync())
+                    {
+                        while (channel.TryRead(out var payload))
+                        {
+                            while (!outputChannel.Out.TryWrite(payload))
+                            {
+                                if (!await outputChannel.Out.WaitToWriteAsync())
+                                {
+                                    // Output was completed, just exit
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
+                    // Input completed, close the output
+                    outputChannel.Out.TryComplete();
+                }
+                catch (Exception ex)
+                {
+                    outputChannel.Out.TryComplete(ex);
+                }
+            });
+
+            return outputChannel.In;
         }
 
         private class ChannelObserver<T> : IObserver<T>
@@ -63,10 +110,10 @@ namespace Microsoft.AspNetCore.SignalR.Internal
                 // ensure we don't block other tasks
 
                 // Right now however, we use unbounded channels, so all of the above is moot because TryWrite will always succeed
-                while(!_output.TryWrite(value))
+                while (!_output.TryWrite(value))
                 {
                     // Wait for a spot
-                    if(!_output.WaitToWriteAsync(_cancellationToken).Result)
+                    if (!_output.WaitToWriteAsync(_cancellationToken).Result)
                     {
                         // Channel was closed.
                         throw new InvalidOperationException("Output channel was closed");

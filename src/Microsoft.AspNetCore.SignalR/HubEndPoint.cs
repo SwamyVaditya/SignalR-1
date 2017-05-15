@@ -307,10 +307,19 @@ namespace Microsoft.AspNetCore.SignalR
             }
         }
 
-        private bool IsChannel(Type type, out Type channelType)
+        private bool IsChannel(Type type, out Type payloadType)
         {
-            channelType = type.AllBaseTypes().FirstOrDefault(t => t.IsGenericType && t.GetGenericTypeDefinition() == typeof(ReadableChannel<>));
-            return channelType != null;
+            var channelType = type.AllBaseTypes().FirstOrDefault(t => t.IsGenericType && t.GetGenericTypeDefinition() == typeof(ReadableChannel<>));
+            if (channelType == null)
+            {
+                payloadType = null;
+                return false;
+            }
+            else
+            {
+                payloadType = channelType.GetGenericArguments()[0];
+                return true;
+            }
         }
 
         private async Task StreamResultsAsync(string invocationId, Connection connection, IHubProtocol protocol, ReadableChannel<object> channel)
@@ -351,13 +360,10 @@ namespace Microsoft.AspNetCore.SignalR
                 channel = ChannelAdapters.FromObservable(result, observableInterface);
                 return true;
             }
-            else if (IsChannel(result.GetType(), out var channelType))
+            else if (IsChannel(result.GetType(), out var payloadType))
             {
-                throw new NotSupportedException("Channels not yet supported");
-
-                // Hrm... of course ReadableChannel isn't variant...
-                //channel = (ReadableChannel<object>)result;
-                //return true;
+                channel = ChannelAdapters.FromChannel(result, payloadType);
+                return true;
             }
             else
             {
